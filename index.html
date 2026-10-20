@@ -2,85 +2,74 @@
 <html lang="pt-BR">
 <head>
     <meta charset="UTF-8">
-    <title>Impressão em Lote - BarTender</title>
+    <title>Impressão por Pedido (PDF)</title>
     <style>
         body { font-family: Arial, sans-serif; margin: 50px; background-color: #f4f4f9; }
-        .card { background: white; padding: 25px; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); max-width: 400px; }
-        select, button { width: 100%; padding: 10px; margin-top: 10px; margin-bottom: 20px; font-size: 16px; border-radius: 4px; border: 1px solid #ccc; }
-        button { background-color: #28a745; color: white; border: none; cursor: pointer; }
-        button:hover { background-color: #218838; }
+        .card { background: white; padding: 25px; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); max-width: 450px; }
+        input, select, button { width: 100%; padding: 10px; margin-top: 10px; margin-bottom: 20px; font-size: 16px; border-radius: 4px; border: 1px solid #ccc; box-sizing: border-box; }
+        button { background-color: #007bff; color: white; border: none; cursor: pointer; }
+        button:hover { background-color: #0056b3; }
         #status { font-weight: bold; margin-top: 10px; }
     </style>
 </head>
 <body>
 
     <div class="card">
-        <h2>Impressão de Etiquetas</h2>
-        <label for="selectGrupos">Escolha o Grupo:</label>
-        <select id="selectGrupos">
-            <option value="">Carregando grupos...</option>
+        <h2>Impressão por Pedido (PDF)</h2>
+        
+        <label for="inputPdf">Selecione o PDF do Pedido:</label>
+        <input type="file" id="inputPdf" accept="application/pdf">
+
+        <label for="inputImpressora">Escolha a Impressora:</label>
+        <select id="inputImpressora">
+            <option value="Smart Color Print SMT-D2 (Padrão)">Smart Color Print SMT-D2 (Padrão)</option>
+            <option value="Argox OS-214plus">Argox OS-214plus</option>
+            <option value="Zebra ZT230">Zebra ZT230</option>
         </select>
 
-        <button onclick="enviarImpressao()">Imprimir Tudo do Grupo</button>
+        <button onclick="enviarPdf()">Ler PDF e Imprimir Etiquetas</button>
         <div id="status"></div>
     </div>
 
     <script>
-        // Carrega os grupos automaticamente ao abrir a página
-        async function carregarGrupos() {
-            try {
-                const resposta = await fetch('/api/grupos');
-                const grupos = await resposta.json();
-                const select = document.getElementById('selectGrupos');
-                
-                select.innerHTML = '<option value="">Selecione um grupo...</option>';
-                grupos.forEach(grupo => {
-                    const option = document.createElement('option');
-                    option.value = grupo;
-                    option.textContent = grupo.toUpperCase();
-                    select.appendChild(option);
-                });
-            } catch (error) {
-                document.getElementById('status').style.color = 'red';
-                document.getElementById('status').textContent = 'Erro ao carregar os grupos do servidor.';
-            }
-        }
-
-        // Envia a ordem de impressão para o backend
-        async function enviarImpressao() {
-            const grupo = document.getElementById('selectGrupos').value;
+        async function enviarPdf() {
+            const fileInput = document.getElementById('inputPdf');
+            const impressora = document.getElementById('inputImpressora').value;
             const statusDiv = document.getElementById('status');
 
-            if (!grupo) {
-                alert('Por favor, selecione um grupo primeiro.');
+            if (fileInput.files.length === 0) {
+                alert('Por favor, selecione um ficheiro PDF.');
                 return;
             }
 
+            const file = fileInput.files[0];
             statusDiv.style.color = 'blue';
-            statusDiv.textContent = 'Enviando arquivos para a impressora...';
+            statusDiv.textContent = 'A processar PDF e a descarregar do GitHub...';
 
-            try {
-                const resposta = await fetch('/api/imprimir', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ grupo })
-                });
+            const reader = new FileReader();
+            reader.readAsDataURL(file);
+            reader.onload = async function () {
+                try {
+                    const resposta = await fetch('/api/imprimir-pdf', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ pdfBase64: reader.result, impressora })
+                    });
 
-                const resultado = await resposta.json();
-                if (resposta.ok) {
-                    statusDiv.style.color = 'green';
-                    statusDiv.textContent = resultado.mensagem;
-                } else {
+                    const resultado = await resposta.json();
+                    if (resposta.ok) {
+                        statusDiv.style.color = 'green';
+                        statusDiv.textContent = resultado.mensagem;
+                    } else {
+                        statusDiv.style.color = 'red';
+                        statusDiv.textContent = resultado.erro;
+                    }
+                } catch (error) {
                     statusDiv.style.color = 'red';
-                    statusDiv.textContent = resultado.erro;
+                    statusDiv.textContent = 'Erro de comunicação com o servidor.';
                 }
-            } catch (error) {
-                statusDiv.style.color = 'red';
-                statusDiv.textContent = 'Erro de comunicação com o servidor.';
-            }
+            };
         }
-
-        carregarGrupos();
     </script>
 </body>
 </html>
