@@ -1,6 +1,6 @@
 const express = require('express');
 const fs = require('fs');
-const path = require('path');
+const path = path = require('path');
 const { execSync } = require('child_process');
 const pdfParse = require('pdf-parse');
 
@@ -10,7 +10,12 @@ app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 app.use(express.static('public'));
 
 const DIRETORIO_PROJETO = __dirname;
-const DIRETORIO_MODELOS = path.join(DIRETORIO_PROJETO, 'modelos');
+const DIRETORIO_TEMPORARIO = path.join(DIRETORIO_PROJETO, 'temp_modelos');
+
+// Garante que a pasta temporária de modelos existe
+if (!fs.existsSync(DIRETORIO_TEMPORARIO)) {
+    fs.mkdirSync(DIRETORIO_TEMPORARIO, { recursive: true });
+}
 
 app.post('/api/imprimir-pdf', async (req, res) => {
     try {
@@ -29,52 +34,28 @@ app.post('/api/imprimir-pdf', async (req, res) => {
         console.log("=============================");
 
         let codigosEncontrados = [];
-
-        // Regex global para capturar qualquer referência que comece com LX seguida de letras/números
         const regexGlobal = /\b(LX[0-9A-Z]+)\b/g;
         let match;
 
         while ((match = regexGlobal.exec(texto)) !== null) {
             let textoBruto = match[1];
-
-            // Remove descrições compridas que venham coladas (ex: MONOCOMANDO, PORTA, PAPELEIRA, CHUVEIRO, HASTE, etc.)
             let codigoLimpo = textoBruto.replace(/(MONOCOMANDO|PORTA|PAPELEIRA|CHUVEIRO|HASTE|TTD|VALVULA|TORNEIRA|GRIF).*$/i, '');
             codigoLimpo = codigoLimpo.trim();
 
-            // Ignora o código fantasma antigo e garante um tamanho mínimo válido
             if (codigoLimpo !== 'LX42114' && codigoLimpo.length >= 5) {
                 codigosEncontrados.push(codigoLimpo);
             }
         }
 
-        // Agrupa e conta quantas vezes cada código aparece no pedido para definir as cópias exatas
+        // Agrupa as quantidades por código detetado
         let mapaItens = {};
         for (let codigo of codigosEncontrados) {
-            let arquivoBtwPath = path.join(DIRETORIO_MODELOS, `${codigo}.btw`);
-            
-            // Tenta variações de letras O e zeros caso o ficheiro use nomenclatura diferente
-            if (!fs.existsSync(arquivoBtwPath)) {
-                let altCodigo = codigo.replace(/O/g, '0');
-                let altPath = path.join(DIRETORIO_MODELOS, `${altCodigo}.btw`);
-                if (fs.existsSync(altPath)) {
-                    codigo = altCodigo;
-                    arquivoBtwPath = altPath;
-                }
-            }
-
-            // Considera apenas se o ficheiro .btw existir fisicamente na pasta
-            if (fs.existsSync(arquivoBtwPath)) {
-                mapaItens[codigo] = (mapaItens[codigo] || 0) + 1;
-            } else {
-                console.log(`Aviso: O código "${codigo}" foi encontrado no PDF, mas não tem modelo .btw correspondente (ignorado).`);
-            }
+            mapaItens[codigo] = (mapaItens[codigo] || 0) + 1;
         }
-
-        console.log('Itens válidos e agrupados para impressão:', mapaItens);
 
         if (Object.keys(mapaItens).length === 0) {
             return res.status(400).json({ 
-                erro: 'Nenhum dos produtos detetados neste PDF possui um ficheiro .btw correspondente na pasta "modelos".' 
+                erro: 'Nenhum código válido foi detetado no PDF.' 
             });
         }
 
@@ -85,21 +66,46 @@ app.post('/api/imprimir-pdf', async (req, res) => {
 
         let totalEtiquetasImpressas = 0;
 
-        // Dispara o BarTender agrupando por produto com o parâmetro de cópias /C=qtd para preencher as colunas
         for (const [codigo, qtd] of Object.entries(mapaItens)) {
-            const arquivoBtwPath = path.join(DIRETORIO_MODELOS, `${codigo}.btw`);
+            // URL Raw do ficheiro .btw no vosso GitHub (Branch: main)
+            // Certifique-se de que o repositório é público ou ajuste para usar token se for privado
+            const urlGitHubBtw = `https://raw.githubusercontent.com/LexxaBagno/Impress-o-Etiquetas/main/modelos/${codigo}.btw`;
+            const caminhoLocalBtw = path.join(DIRETORIO_TEMPORARIO, `${codigo}.btw`);
 
-            // O parâmetro /C=qtd diz ao BarTender para imprimir todas as cópias deste modelo no mesmo trabalho,
-            // respeitando a configuração de 2 colunas do layout.
-            const comando = `cmd.exe /c ""C:\\Program Files\\Seagull\\BarTender 12.1\\BarTend.exe" /F="${arquivoBtwPath}" /PRN="${impressora}" /C=${qtd} /P /X"`;
-            console.log(`Enviando lote: ${codigo}.btw com ${qtd} cópia(s)`);
-            execSync(comando);
-            totalEtiquetasImpressas += qtd;
+            console.log(`A descarregar modelo do GitHub: ${urlGitHubBtw}`);
+
+            try {
+                // Faz o download direto do raw do GitHub usando fetch nativo do Node.js
+                const respostaGitHub = await fetch(urlGitHubBtw);
+                
+                if (!respostaGitHub.ok) {
+                    console.warn(`Aviso: O modelo "${codigo}.btw" não foi encontrado no GitHub (Status: ${respostaGitHub.status}).`);
+                    continue; // Ignora e passa para o próximo se não existir no GitHub
+                }
+
+                const bufferBtw = Buffer.from(await respostaGitHub.arrayBuffer());
+                fs.writeFileSync(caminhoLocalBtw, bufferBtw);
+
+                // Dispara o BarTender com o ficheiro descarregado e o parâmetro de cópias /C=qtd
+                const comando = `cmd.exe /c ""C:\\Program Files\\Seagull\\BarTender 12.1\\BarTend.exe" /F="${caminhoLocalBtw}" /PRN="${impressora}" /C=${qtd} /P /X"`;
+                console.log(`Imprimindo ${codigo}.btw com ${qtd} cópia(s)`);
+                execSync(comando);
+                totalEtiquetasImpressas += qtd;
+
+            } catch (errErroDownload) {
+                console.error(`Erro ao obter ou imprimir o modelo ${codigo} do GitHub:`, errErroDownload.message);
+            }
+        }
+
+        if (totalEtiquetasImpressas === 0) {
+            return res.status(400).json({ 
+                erro: 'Nenhum modelo correspondente foi encontrado ou descarregado com sucesso a partir do GitHub.' 
+            });
         }
 
         res.json({ 
             sucesso: true, 
-            mensagem: `PDF processado com sucesso! ${totalEtiquetasImpressas} etiqueta(s) enviada(s) para a impressora.` 
+            mensagem: `PDF processado! ${totalEtiquetasImpressas} etiqueta(s) descarregadas do GitHub e impressas com sucesso.` 
         });
 
     } catch (error) {
