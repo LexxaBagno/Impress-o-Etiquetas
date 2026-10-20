@@ -1,8 +1,16 @@
 const express = require('express');
 const fs = require('fs');
-const path = path = require('path');
+const path = require('path');
 const { execSync } = require('child_process');
 const pdfParse = require('pdf-parse');
+
+// Suporte para fetch em versões mais antigas do Node.js
+let fetch;
+if (typeof globalThis.fetch === 'function') {
+    fetch = globalThis.fetch;
+} else {
+    fetch = require('node-fetch');
+}
 
 const app = express();
 app.use(express.json({ limit: '50mb' }));
@@ -10,11 +18,55 @@ app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 app.use(express.static('public'));
 
 const DIRETORIO_PROJETO = __dirname;
-const DIRETORIO_TEMPORARIO = path.join(DIRETORIO_PROJETO, 'temp_modelos');
+const DIRETORIO_MODELOS_LOCAL = path.join(DIRETORIO_PROJETO, 'modelos');
+const DIRETORIO_TEMP_GITHUB = path.join(DIRETORIO_PROJETO, 'temp_github_modelos');
 
-// Garante que a pasta temporária de modelos existe
-if (!fs.existsSync(DIRETORIO_TEMPORARIO)) {
-    fs.mkdirSync(DIRETORIO_TEMPORARIO, { recursive: true });
+// Cria as pastas necessárias caso não existam
+if (!fs.existsSync(DIRETORIO_MODELOS_LOCAL)) {
+    fs.mkdirSync(DIRETORIO_MODELOS_LOCAL, { recursive: true });
+}
+if (!fs.existsSync(DIRETORIO_TEMP_GITHUB)) {
+    fs.mkdirSync(DIRETORIO_TEMP_GITHUB, { recursive: true });
+}
+
+// Função para buscar o modelo no GitHub ou no fallback local
+async function obterCaminhoModeloBtw(codigo) {
+    const nomeArquivo = `${codigo}.btw`;
+    const caminhoTemp = path.join(DIRETORIO_TEMP_GITHUB, nomeArquivo);
+    const caminhoLocal = path.join(DIRETORIO_MODELOS_LOCAL, nomeArquivo);
+
+    // 1. Tenta baixar do GitHub em tempo de execução
+    const urlGitHub = `https://raw.githubusercontent.com/LexxaBagno/Impress-o-Etiquetas/main/modelos/${nomeArquivo}`;
+    try {
+        console.log(`[GitHub] Buscando modelo online: ${urlGitHub}`);
+        const res = await fetch(urlGitHub);
+        if (res.ok) {
+            const arrayBuffer = await res.arrayBuffer();
+            fs.writeFileSync(caminhoTemp, Buffer.from(arrayBuffer));
+            console.log(`[GitHub] Modelo "${nomeArquivo}" baixado do GitHub com sucesso!`);
+            return caminhoTemp;
+        } else {
+            console.warn(`[GitHub] Modelo "${nomeArquivo}" não encontrado no GitHub (HTTP ${res.status}).`);
+        }
+    } catch (err) {
+        console.error(`[GitHub] Falha ao tentar conectar ao GitHub para ${nomeArquivo}:`, err.message);
+    }
+
+    // 2. Fallback: verifica se existe na pasta local 'modelos'
+    if (fs.existsSync(caminhoLocal)) {
+        console.log(`[Local] Usando modelo da pasta local: ${caminhoLocal}`);
+        return caminhoLocal;
+    }
+
+    // 3. Tenta variação de letras O / zeros localmente
+    const altCodigo = codigo.replace(/O/g, '0');
+    const altCaminhoLocal = path.join(DIRETORIO_MODELOS_LOCAL, `${altCodigo}.btw`);
+    if (fs.existsSync(altCaminhoLocal)) {
+        console.log(`[Local] Usando modelo alternativo local: ${altCaminhoLocal}`);
+        return altCaminhoLocal;
+    }
+
+    return null;
 }
 
 app.post('/api/imprimir-pdf', async (req, res) => {
@@ -47,66 +99,56 @@ app.post('/api/imprimir-pdf', async (req, res) => {
             }
         }
 
-        // Agrupa as quantidades por código detetado
+        // Agrupa as quantidades de cada código
         let mapaItens = {};
         for (let codigo of codigosEncontrados) {
             mapaItens[codigo] = (mapaItens[codigo] || 0) + 1;
         }
 
+        console.log('Itens detectados no PDF:', mapaItens);
+
         if (Object.keys(mapaItens).length === 0) {
             return res.status(400).json({ 
-                erro: 'Nenhum código válido foi detetado no PDF.' 
+                erro: 'Nenhum código LX válido foi localizado neste PDF.' 
             });
         }
 
-        // Fecha instâncias anteriores travadas do BarTender na memória
+        // Encerra processos pendentes do BarTender na memória
         try {
             execSync('taskkill /f /im Bartend.exe', { stdio: 'ignore' });
         } catch (e) {}
 
         let totalEtiquetasImpressas = 0;
+        let errosModelos = [];
 
         for (const [codigo, qtd] of Object.entries(mapaItens)) {
-            // URL Raw do ficheiro .btw no vosso GitHub (Branch: main)
-            // Certifique-se de que o repositório é público ou ajuste para usar token se for privado
-            const urlGitHubBtw = `https://raw.githubusercontent.com/LexxaBagno/Impress-o-Etiquetas/main/modelos/${codigo}.btw`;
-            const caminhoLocalBtw = path.join(DIRETORIO_TEMPORARIO, `${codigo}.btw`);
+            // Busca o arquivo .btw (GitHub -> Local)
+            const caminhoBtw = await obterCaminhoModeloBtw(codigo);
 
-            console.log(`A descarregar modelo do GitHub: ${urlGitHubBtw}`);
-
-            try {
-                // Faz o download direto do raw do GitHub usando fetch nativo do Node.js
-                const respostaGitHub = await fetch(urlGitHubBtw);
-                
-                if (!respostaGitHub.ok) {
-                    console.warn(`Aviso: O modelo "${codigo}.btw" não foi encontrado no GitHub (Status: ${respostaGitHub.status}).`);
-                    continue; // Ignora e passa para o próximo se não existir no GitHub
-                }
-
-                const bufferBtw = Buffer.from(await respostaGitHub.arrayBuffer());
-                fs.writeFileSync(caminhoLocalBtw, bufferBtw);
-
-                // Dispara o BarTender com o ficheiro descarregado e o parâmetro de cópias /C=qtd
-                const comando = `cmd.exe /c ""C:\\Program Files\\Seagull\\BarTender 12.1\\BarTend.exe" /F="${caminhoLocalBtw}" /PRN="${impressora}" /C=${qtd} /P /X"`;
-                console.log(`Imprimindo ${codigo}.btw com ${qtd} cópia(s)`);
+            if (caminhoBtw) {
+                // Comando do BarTender com lote /C=qtd para intercalar colunas corretamente
+                const comando = `cmd.exe /c ""C:\\Program Files\\Seagull\\BarTender 12.1\\BarTend.exe" /F="${caminhoBtw}" /PRN="${impressora}" /C=${qtd} /P /X"`;
+                console.log(`[Impressão] Disparando: ${codigo} (${qtd} cópia(s))`);
                 execSync(comando);
                 totalEtiquetasImpressas += qtd;
-
-            } catch (errErroDownload) {
-                console.error(`Erro ao obter ou imprimir o modelo ${codigo} do GitHub:`, errErroDownload.message);
+            } else {
+                errosModelos.push(codigo);
+                console.warn(`[Aviso] O modelo para "${codigo}" não foi encontrado no GitHub nem na pasta local.`);
             }
         }
 
         if (totalEtiquetasImpressas === 0) {
             return res.status(400).json({ 
-                erro: 'Nenhum modelo correspondente foi encontrado ou descarregado com sucesso a partir do GitHub.' 
+                erro: `Nenhum dos modelos (${errosModelos.join(', ')}) foi localizado no GitHub ou na pasta local.` 
             });
         }
 
-        res.json({ 
-            sucesso: true, 
-            mensagem: `PDF processado! ${totalEtiquetasImpressas} etiqueta(s) descarregadas do GitHub e impressas com sucesso.` 
-        });
+        let msgFinal = `PDF processado com sucesso! ${totalEtiquetasImpressas} etiqueta(s) enviada(s) para a impressora.`;
+        if (errosModelos.length > 0) {
+            msgFinal += ` (Modelos não encontrados: ${errosModelos.join(', ')})`;
+        }
+
+        res.json({ sucesso: true, mensagem: msgFinal });
 
     } catch (error) {
         console.error('Erro detalhado no servidor:', error);
@@ -115,5 +157,5 @@ app.post('/api/imprimir-pdf', async (req, res) => {
 });
 
 app.listen(3000, () => {
-    console.log('Servidor a rodar em http://localhost:3000');
+    console.log('Servidor rodando em http://localhost:3000');
 });
